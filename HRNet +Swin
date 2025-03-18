@@ -1,0 +1,93 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchvision.transforms as transforms
+from torch.utils.data import DataLoader, Dataset
+from torchvision.models.segmentation import deeplabv3_resnet101
+from timm import create_model
+import cv2
+import numpy as np
+from PIL import Image
+import os
+from torchvision.datasets import ImageFolder
+
+# --- Preprocessing ---
+def preprocess_image(r"C:\Users\Thinkpad\Desktop\UPdation_CMC\storagetanks_125.jpg"):
+    image = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+    image = cv2.equalizeHist(image)
+    image = image / 255.0  # Normalization
+    image = np.expand_dims(image, axis=0)  # Add channel dimension
+    return torch.tensor(image, dtype=torch.float32)
+
+# --- UC Merced Dataset Loader ---
+class UCMercedDataset(Dataset):
+    def __init__(self, root_dir, transform=None):
+        self.dataset = ImageFolder(root=root_dir, transform=transform)
+    
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        image, label = self.dataset[idx]
+        return image, label, label  # Dummy label for segmentation (can be replaced with actual segmentation masks)
+
+# --- HRNet-W48-based Segmentation ---
+class HRNetSegmentation(nn.Module):
+    def __init__(self, num_classes=2):
+        super(HRNetSegmentation, self).__init__()
+        self.hrnet = deeplabv3_resnet101(pretrained=True)
+        self.hrnet.classifier[4] = nn.Conv2d(256, num_classes, kernel_size=1)
+    
+    def forward(self, x):
+        return self.hrnet(x)['out']
+
+# --- Swin Transformer for Classification ---
+class SwinTransformerClassifier(nn.Module):
+    def __init__(self, num_classes=10):
+        super(SwinTransformerClassifier, self).__init__()
+        self.swin = create_model("swin_tiny_patch4_window7_224", pretrained=True, num_classes=num_classes)
+    
+    def forward(self, x):
+        return self.swin(x)
+
+# --- Combined Model ---
+class HybridHRNetSwin(nn.Module):
+    def __init__(self, num_seg_classes=2, num_cls_classes=10):
+        super(HybridHRNetSwin, self).__init__()
+        self.segmentation = HRNetSegmentation(num_seg_classes)
+        self.classifier = SwinTransformerClassifier(num_cls_classes)
+    
+    def forward(self, x):
+        seg_output = self.segmentation(x)
+        cls_output = self.classifier(x)
+        return seg_output, cls_output
+
+# --- Training Setup ---
+def train_model(model, dataloader, epochs=10, lr=0.001):
+    criterion_seg = nn.CrossEntropyLoss()
+    criterion_cls = nn.CrossEntropyLoss()
+    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+    
+    for epoch in range(epochs):
+        for images, labels_seg, labels_cls in dataloader:
+            images, labels_seg, labels_cls = images.cuda(), labels_seg.cuda(), labels_cls.cuda()
+            
+            optimizer.zero_grad()
+            seg_output, cls_output = model(images)
+            loss_seg = criterion_seg(seg_output, labels_seg)
+            loss_cls = criterion_cls(cls_output, labels_cls)
+            loss = loss_seg + loss_cls
+            loss.backward()
+            optimizer.step()
+        
+        print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item():.4f}")
+
+if __name__ == "__main__":
+    model = HybridHRNetSwin(num_seg_classes=2, num_cls_classes=21).cuda()
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)),
+        transforms.ToTensor()
+    ])
+    dataset = UCMercedDataset(root_dir="C:\Users\Thinkpad\Desktop\UPdation_CMC/UCMerced_LandUse/Images", transform=transform)
+    dataloader = DataLoader(dataset, batch_size=16, shuffle=True)
+    train_model(model, dataloader)
